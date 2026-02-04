@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Goodbye from SessionLink</title>
+  <style>
+    :root {
+      --bg-primary: #0f172a;
+      --bg-secondary: #1e293b;
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent-color: #6366f1;
+      --accent-hover: #4f46e5;
+      --border-color: #334155;
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg-primary: #f8fafc;
+        --bg-secondary: #ffffff;
+        --text-primary: #1e293b;
+        --text-secondary: #64748b;
+        --text-muted: #94a3b8;
+        --border-color: #e2e8f0;
+      }
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.6;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .container {
+      max-width: 600px;
+      padding: 40px 20px;
+      text-align: center;
+    }
+
+    .icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 80px;
+      height: 80px;
+      background-color: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 50%;
+      margin-bottom: 24px;
+      color: var(--text-muted);
+    }
+
+    .icon svg {
+      width: 40px;
+      height: 40px;
+    }
+
+    h1 {
+      font-size: 32px;
+      font-weight: 700;
+      margin-bottom: 16px;
+    }
+
+    .subtitle {
+      font-size: 18px;
+      color: var(--text-secondary);
+      margin-bottom: 32px;
+    }
+
+    .feedback-section {
+      background-color: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 32px;
+      margin-bottom: 32px;
+      text-align: left;
+    }
+
+    .feedback-section h2 {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      text-align: center;
+    }
+
+    .feedback-options {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .feedback-option {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      background-color: var(--bg-primary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .feedback-option:hover {
+      border-color: var(--accent-color);
+    }
+
+    .feedback-option input {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent-color);
+    }
+
+    .feedback-option label {
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    .feedback-text {
+      width: 100%;
+      min-height: 100px;
+      padding: 12px;
+      margin-top: 16px;
+      background-color: var(--bg-primary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 14px;
+      resize: vertical;
+    }
+
+    .feedback-text:focus {
+      outline: none;
+      border-color: var(--accent-color);
+    }
+
+    .submit-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      padding: 14px 24px;
+      margin-top: 16px;
+      background: linear-gradient(135deg, var(--accent-color), var(--accent-hover));
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .submit-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(99, 102, 241, 0.3);
+    }
+
+    .thank-you {
+      display: none;
+      padding: 24px;
+      background-color: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      margin-bottom: 32px;
+    }
+
+    .thank-you.show {
+      display: block;
+    }
+
+    .thank-you h3 {
+      font-size: 20px;
+      margin-bottom: 8px;
+      color: #10b981;
+    }
+
+    .reinstall-section {
+      padding: 24px;
+      background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(168, 85, 247, 0.1));
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+    }
+
+    .reinstall-section p {
+      color: var(--text-secondary);
+      margin-bottom: 16px;
+    }
+
+    .reinstall-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 24px;
+      background-color: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      color: var(--text-primary);
+      text-decoration: none;
+      font-weight: 500;
+      transition: all 0.2s ease;
+    }
+
+    .reinstall-btn:hover {
+      border-color: var(--accent-color);
+      background-color: var(--accent-color);
+      color: white;
+    }
+
+    .footer {
+      margin-top: 32px;
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 600px) {
+      h1 {
+        font-size: 24px;
+      }
+
+      .subtitle {
+        font-size: 16px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"></circle>
+        <path d="M16 16s-1.5-2-4-2-4 2-4 2"></path>
+        <line x1="9" y1="9" x2="9.01" y2="9"></line>
+        <line x1="15" y1="9" x2="15.01" y2="9"></line>
+      </svg>
+    </div>
+
+    <h1>We're Sorry to See You Go</h1>
+    <p class="subtitle">Thank you for trying SessionLink. Your feedback helps us improve.</p>
+
+    <div class="feedback-section" id="feedback-form">
+      <h2>What made you uninstall?</h2>
+      
+      <div class="feedback-options">
+        <div class="feedback-option">
+          <input type="radio" name="reason" id="reason1" value="not-useful">
+          <label for="reason1">It wasn't useful for my needs</label>
+        </div>
+        <div class="feedback-option">
+          <input type="radio" name="reason" id="reason2" value="too-complicated">
+          <label for="reason2">It was too complicated to use</label>
+        </div>
+        <div class="feedback-option">
+          <input type="radio" name="reason" id="reason3" value="bugs">
+          <label for="reason3">I experienced bugs or errors</label>
+        </div>
+        <div class="feedback-option">
+          <input type="radio" name="reason" id="reason4" value="privacy">
+          <label for="reason4">Privacy or security concerns</label>
+        </div>
+        <div class="feedback-option">
+          <input type="radio" name="reason" id="reason5" value="found-alternative">
+          <label for="reason5">Found a better alternative</label>
+        </div>
+        <div class="feedback-option">
+          <input type="radio" name="reason" id="reason6" value="other">
+          <label for="reason6">Other reason</label>
+        </div>
+      </div>
+
+      <textarea class="feedback-text" placeholder="Any additional feedback? (optional)"></textarea>
+
+      <button class="submit-btn" id="submit-feedback">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"></line>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+        </svg>
+        Submit Feedback
+      </button>
+    </div>
+
+    <div class="thank-you" id="thank-you">
+      <h3>Thank You!</h3>
+      <p>Your feedback has been recorded. We appreciate you taking the time to help us improve.</p>
+    </div>
+
+    <div class="reinstall-section">
+      <p>Changed your mind? You can always reinstall SessionLink.</p>
+      <a href="https://github.com/sessionlink/extension" target="_blank" class="reinstall-btn">
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="7 10 12 15 17 10"></polyline>
+          <line x1="12" y1="15" x2="12" y2="3"></line>
+        </svg>
+        Reinstall SessionLink
+      </a>
+    </div>
+
+    <footer class="footer">
+      <p>SessionLink • Made with care for AI enthusiasts</p>
+    </footer>
+  </div>
+
+  <script>
+    document.getElementById('submit-feedback').addEventListener('click', function() {
+      const selectedReason = document.querySelector('input[name="reason"]:checked');
+      const additionalFeedback = document.querySelector('.feedback-text').value;
+      
+      // In a real implementation, you would send this to your analytics service
+      // For now, we just show a thank you message
+      console.log('Feedback submitted:', {
+        reason: selectedReason ? selectedReason.value : 'none',
+        additional: additionalFeedback
+      });
+
+      // Hide form, show thank you
+      document.getElementById('feedback-form').style.display = 'none';
+      document.getElementById('thank-you').classList.add('show');
+    });
+  </script>
+</body>
+</html>
