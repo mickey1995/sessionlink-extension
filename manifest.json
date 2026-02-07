@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SessionLink - AI Memory Bridge",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Save and restore AI conversation context across sessions. Works with ChatGPT, Claude, and Gemini.",
   "author": "SessionLink Team",
 
@@ -50,7 +50,7 @@
         "https://claude.ai/*",
         "https://gemini.google.com/*"
       ],
-      "js": ["lib/browser-polyfill.js", "scripts/utils.js", "scripts/content.js"],
+      "js": ["scripts/content.js"],
       "css": ["ui/styles.css"],
       "run_at": "document_idle"
     }
@@ -58,7 +58,7 @@
 
   "web_accessible_resources": [
     {
-      "resources": ["ui/styles.css", "icons/*"],
+      "resources": ["ui/styles.css", "icons/*", "pages/*"],
       "matches": [
         "https://chatgpt.com/*",
         "https://chat.openai.com/*",

@@ -1,452 +1,443 @@
 /**
  * SessionLink Content Script
- * Handles DOM injection and conversation scraping for ChatGPT, Claude, and Gemini
+ * Handles DOM injection and conversation scraping for ChatGPT, Claude, and Gemini.
+ *
+ * Key fixes in this version:
+ *  - Uses chrome.runtime.sendMessage with callback (not Promise) so the
+ *    background service-worker always receives the message.
+ *  - Updated DOM selectors for ChatGPT (Feb 2026 DOM), Claude, and Gemini.
+ *  - Resume injects text AND simulates Enter to auto-send per the spec.
+ *  - Robust retry loop for button injection on SPA navigations.
  */
 
-(function() {
+(function () {
   'use strict';
 
-  // Prevent multiple injections
-  if (window.sessionLinkInjected) {
-    return;
-  }
-  window.sessionLinkInjected = true;
-
-  // Platform detection and configuration
-  const PLATFORMS = {
+  // ── Platform configs ───────────────────────────────────────────────
+  var PLATFORMS = {
     chatgpt: {
       name: 'ChatGPT',
       hostPatterns: ['chatgpt.com', 'chat.openai.com'],
       selectors: {
-        messageContainer: '[data-message-author-role]',
+        // ChatGPT 2025-2026 DOM
         userMessage: '[data-message-author-role="user"]',
         assistantMessage: '[data-message-author-role="assistant"]',
+        allMessages: '[data-message-author-role]',
         inputArea: '#prompt-textarea',
-        sendButton: '[data-testid="send-button"]',
-        conversationArea: 'main',
-        newChatIndicator: '[data-testid="composer-background"]'
+        sendButton: '[data-testid="send-button"], button[aria-label="Send prompt"]',
+        conversationArea: 'main'
       },
-      getMessageText: (el) => {
-        const contentDiv = el.querySelector('.markdown, .whitespace-pre-wrap');
-        return contentDiv ? contentDiv.innerText.trim() : el.innerText.trim();
-      },
-      isNewChat: () => {
-        const messages = document.querySelectorAll('[data-message-author-role]');
-        return messages.length === 0;
+      getMessageText: function (el) {
+        var md = el.querySelector('.markdown, .whitespace-pre-wrap, .text-message');
+        return md ? md.innerText.trim() : el.innerText.trim();
       }
     },
     claude: {
       name: 'Claude',
       hostPatterns: ['claude.ai'],
       selectors: {
-        messageContainer: '[data-testid="user-message"], [data-testid="ai-message"]',
-        userMessage: '[data-testid="user-message"]',
-        assistantMessage: '[data-testid="ai-message"]',
-        inputArea: '[contenteditable="true"]',
-        sendButton: 'button[aria-label="Send message"], button[type="submit"]',
-        conversationArea: 'main',
-        newChatIndicator: null
+        userMessage: '[data-testid="user-message"], .font-user-message',
+        assistantMessage: '[data-testid="ai-message"], .font-claude-message',
+        allMessages: '[data-testid="user-message"], [data-testid="ai-message"], .font-user-message, .font-claude-message',
+        inputArea: '[contenteditable="true"].ProseMirror, div[contenteditable="true"], fieldset textarea',
+        sendButton: 'button[aria-label="Send Message"], button[aria-label="Send message"], fieldset button[type="button"]:last-of-type',
+        conversationArea: 'main, [role="main"]'
       },
-      getMessageText: (el) => {
+      getMessageText: function (el) {
         return el.innerText.trim();
-      },
-      isNewChat: () => {
-        const messages = document.querySelectorAll('[data-testid="user-message"], [data-testid="ai-message"]');
-        return messages.length === 0;
       }
     },
     gemini: {
       name: 'Gemini',
       hostPatterns: ['gemini.google.com'],
       selectors: {
-        messageContainer: 'message-content, .conversation-turn',
-        userMessage: 'user-query, .user-message',
-        assistantMessage: 'model-response, .model-response',
-        inputArea: '.ql-editor, [contenteditable="true"], textarea',
-        sendButton: 'button[aria-label="Send message"], .send-button',
-        conversationArea: 'main, .conversation-container',
-        newChatIndicator: null
+        userMessage: '.query-text, user-query, .user-query',
+        assistantMessage: '.model-response-text, model-response, .response-content',
+        allMessages: '.query-text, .model-response-text, user-query, model-response',
+        inputArea: '.ql-editor, rich-textarea .ql-editor, div[contenteditable="true"], textarea[aria-label]',
+        sendButton: 'button.send-button, button[aria-label="Send message"], .send-button-container button',
+        conversationArea: 'main, .conversation-container'
       },
-      getMessageText: (el) => {
+      getMessageText: function (el) {
         return el.innerText.trim();
-      },
-      isNewChat: () => {
-        const url = window.location.href;
-        return url.includes('/app') && !url.includes('/c/');
       }
     }
   };
 
-  // Detect current platform
+  // ── Detect current platform ────────────────────────────────────────
   function detectPlatform() {
-    const hostname = window.location.hostname;
-    for (const [key, config] of Object.entries(PLATFORMS)) {
-      if (config.hostPatterns.some(pattern => hostname.includes(pattern))) {
-        return { id: key, ...config };
+    var hostname = window.location.hostname;
+    var keys = Object.keys(PLATFORMS);
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i];
+      var cfg = PLATFORMS[key];
+      for (var j = 0; j < cfg.hostPatterns.length; j++) {
+        if (hostname.indexOf(cfg.hostPatterns[j]) !== -1) {
+          return { id: key, name: cfg.name, selectors: cfg.selectors, getMessageText: cfg.getMessageText };
+        }
       }
     }
     return null;
   }
 
-  const currentPlatform = detectPlatform();
-  if (!currentPlatform) {
-    console.log('SessionLink: Not on a supported platform');
-    return;
+  var platform = detectPlatform();
+  if (!platform) return;
+
+  // Prevent double-injection (only on supported platforms)
+  if (window.__sessionLinkInjected) return;
+  window.__sessionLinkInjected = true;
+
+  console.log('SessionLink: detected ' + platform.name);
+
+  // ── Messaging helper (callback-based, works reliably with MV3) ────
+  function sendMsg(msg, cb) {
+    try {
+      chrome.runtime.sendMessage(msg, function (response) {
+        if (chrome.runtime.lastError) {
+          console.warn('SessionLink sendMsg error:', chrome.runtime.lastError.message);
+          if (cb) cb({ success: false, error: chrome.runtime.lastError.message });
+          return;
+        }
+        if (cb) cb(response || { success: false, error: 'No response' });
+      });
+    } catch (e) {
+      console.error('SessionLink sendMsg exception:', e);
+      if (cb) cb({ success: false, error: e.message });
+    }
   }
 
-  console.log(`SessionLink: Detected platform - ${currentPlatform.name}`);
+  // ── Scrape conversation ────────────────────────────────────────────
+  function scrapeConversation(maxTurns) {
+    maxTurns = maxTurns || 15;
+    var messages = [];
+    var sel = platform.selectors;
 
-  // Create and inject the floating button container
-  function createButtonContainer() {
-    const existing = document.getElementById('sessionlink-container');
-    if (existing) {
-      existing.remove();
+    // Try role-based approach first (ChatGPT)
+    var allEls = document.querySelectorAll(sel.allMessages);
+    if (allEls.length > 0) {
+      for (var i = 0; i < allEls.length; i++) {
+        var el = allEls[i];
+        var role = el.getAttribute('data-message-author-role');
+        if (!role) {
+          // Determine role from selector match
+          if (el.matches(sel.userMessage)) {
+            role = 'user';
+          } else {
+            role = 'assistant';
+          }
+        }
+        var text = platform.getMessageText(el);
+        if (text && text.length > 0) {
+          messages.push({ role: role, content: text });
+        }
+      }
     }
 
-    const container = document.createElement('div');
-    container.id = 'sessionlink-container';
-    container.className = 'sessionlink-floating-container';
-    
-    return container;
-  }
-
-  // Create Save State button
-  function createSaveButton() {
-    const button = document.createElement('button');
-    button.id = 'sessionlink-save-btn';
-    button.className = 'sessionlink-btn sessionlink-save-btn';
-    button.innerHTML = `
-      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
-        <polyline points="17 21 17 13 7 13 7 21"></polyline>
-        <polyline points="7 3 7 8 15 8"></polyline>
-      </svg>
-      <span>Save State</span>
-    `;
-    button.title = 'Save conversation context for later';
-    button.addEventListener('click', handleSaveState);
-    return button;
-  }
-
-  // Create Resume button
-  function createResumeButton() {
-    const button = document.createElement('button');
-    button.id = 'sessionlink-resume-btn';
-    button.className = 'sessionlink-btn sessionlink-resume-btn';
-    button.innerHTML = `
-      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <polyline points="1 4 1 10 7 10"></polyline>
-        <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
-      </svg>
-      <span>Resume State</span>
-    `;
-    button.title = 'Resume from last saved context';
-    button.addEventListener('click', handleResumeState);
-    return button;
-  }
-
-  // Scrape conversation messages
-  function scrapeConversation(maxTurns = 15) {
-    const messages = [];
-    const selectors = currentPlatform.selectors;
-    
-    // Get all message elements
-    let userMessages = document.querySelectorAll(selectors.userMessage);
-    let assistantMessages = document.querySelectorAll(selectors.assistantMessage);
-    
-    // Alternative selectors for different page states
-    if (userMessages.length === 0 && assistantMessages.length === 0) {
-      // Try alternative approach - get all messages and determine role
-      const allMessages = document.querySelectorAll(selectors.messageContainer);
-      allMessages.forEach((msg, index) => {
-        const role = msg.getAttribute('data-message-author-role') || 
-                     (msg.matches(selectors.userMessage) ? 'user' : 'assistant');
-        const text = currentPlatform.getMessageText(msg);
-        if (text) {
-          messages.push({ role, content: text });
+    // Fallback: try user + assistant separately and sort by DOM order
+    if (messages.length === 0) {
+      var userEls = document.querySelectorAll(sel.userMessage);
+      var assistEls = document.querySelectorAll(sel.assistantMessage);
+      var combined = [];
+      for (var u = 0; u < userEls.length; u++) {
+        combined.push({ el: userEls[u], role: 'user' });
+      }
+      for (var a = 0; a < assistEls.length; a++) {
+        combined.push({ el: assistEls[a], role: 'assistant' });
+      }
+      // Sort by vertical position
+      combined.sort(function (x, y) {
+        return (x.el.getBoundingClientRect().top + window.scrollY) -
+               (y.el.getBoundingClientRect().top + window.scrollY);
+      });
+      for (var c = 0; c < combined.length; c++) {
+        var txt = platform.getMessageText(combined[c].el);
+        if (txt && txt.length > 0) {
+          messages.push({ role: combined[c].role, content: txt });
         }
-      });
-    } else {
-      // Interleave user and assistant messages
-      const allElements = [];
-      
-      userMessages.forEach(el => {
-        allElements.push({ el, role: 'user', pos: getElementPosition(el) });
-      });
-      
-      assistantMessages.forEach(el => {
-        allElements.push({ el, role: 'assistant', pos: getElementPosition(el) });
-      });
-      
-      // Sort by position in document
-      allElements.sort((a, b) => a.pos - b.pos);
-      
-      allElements.forEach(item => {
-        const text = currentPlatform.getMessageText(item.el);
-        if (text) {
-          messages.push({ role: item.role, content: text });
-        }
-      });
+      }
     }
-    
-    // Get last N turns (a turn = user + assistant)
-    const turns = maxTurns * 2;
-    return messages.slice(-turns);
+
+    // Keep last N turns
+    var limit = maxTurns * 2;
+    if (messages.length > limit) {
+      messages = messages.slice(messages.length - limit);
+    }
+    return messages;
   }
 
-  // Get element position for sorting
-  function getElementPosition(el) {
-    const rect = el.getBoundingClientRect();
-    return rect.top + window.scrollY;
-  }
-
-  // Sanitize text to prevent injection
-  function sanitizeText(text) {
+  // ── Sanitize text ──────────────────────────────────────────────────
+  function sanitize(text) {
     if (!text) return '';
-    // Remove potentially dangerous content
     return text
-      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-      .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
       .replace(/<[^>]+>/g, '')
       .replace(/javascript:/gi, '')
       .replace(/on\w+\s*=/gi, '')
       .trim();
   }
 
-  // Handle Save State button click
-  async function handleSaveState() {
-    const saveBtn = document.getElementById('sessionlink-save-btn');
-    const originalContent = saveBtn.innerHTML;
-    
-    try {
-      // Show loading state
-      saveBtn.innerHTML = `
-        <svg class="sessionlink-spinner" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="10"></circle>
-        </svg>
-        <span>Saving...</span>
-      `;
-      saveBtn.disabled = true;
+  // ── Inject text into the chat input ────────────────────────────────
+  function injectIntoInput(text) {
+    var sel = platform.selectors;
+    var input = document.querySelector(sel.inputArea);
+    if (!input) {
+      // Broad fallback
+      input = document.querySelector('#prompt-textarea, [contenteditable="true"], textarea');
+    }
+    if (!input) return false;
 
-      // Scrape conversation
-      const messages = scrapeConversation(15);
-      
-      if (messages.length === 0) {
-        showNotification('No conversation found to save', 'error');
-        return;
+    if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
+      // Native setter to bypass React controlled component
+      var nativeSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype, 'value'
+      );
+      if (nativeSetter && nativeSetter.set) {
+        nativeSetter.set.call(input, text);
+      } else {
+        input.value = text;
       }
-
-      // Sanitize all messages
-      const sanitizedMessages = messages.map(msg => ({
-        role: msg.role,
-        content: sanitizeText(msg.content)
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (input.getAttribute('contenteditable') === 'true' || input.isContentEditable) {
+      // ContentEditable (ChatGPT ProseMirror, Claude, Gemini)
+      input.focus();
+      input.innerHTML = '<p>' + escapeHtml(text) + '</p>';
+      input.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        cancelable: true,
+        inputType: 'insertText',
+        data: text
       }));
-
-      // Format conversation for summarization
-      const conversationText = sanitizedMessages
-        .map(msg => `${msg.role.toUpperCase()}: ${msg.content}`)
-        .join('\n\n');
-
-      // Send to background script for summarization
-      const response = await sendMessageToBackground({
-        action: 'summarize',
-        conversation: conversationText,
-        platform: currentPlatform.name,
-        url: window.location.href,
-        timestamp: new Date().toISOString()
-      });
-
-      if (response.success) {
-        showNotification('Context saved successfully!', 'success');
-      } else {
-        showNotification(response.error || 'Failed to save context', 'error');
-      }
-
-    } catch (error) {
-      console.error('SessionLink: Save error', error);
-      showNotification('Error saving context: ' + error.message, 'error');
-    } finally {
-      saveBtn.innerHTML = originalContent;
-      saveBtn.disabled = false;
-    }
-  }
-
-  // Handle Resume State button click
-  async function handleResumeState() {
-    const resumeBtn = document.getElementById('sessionlink-resume-btn');
-    const originalContent = resumeBtn.innerHTML;
-    
-    try {
-      // Show loading state
-      resumeBtn.innerHTML = `
-        <svg class="sessionlink-spinner" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="10"></circle>
-        </svg>
-        <span>Loading...</span>
-      `;
-      resumeBtn.disabled = true;
-
-      // Get last saved state from storage
-      const response = await sendMessageToBackground({
-        action: 'getLastSave'
-      });
-
-      if (!response.success || !response.data) {
-        showNotification('No saved context found', 'error');
-        return;
-      }
-
-      const resumePrompt = response.data.summary;
-      
-      // Inject into input area
-      const injected = await injectPrompt(resumePrompt);
-      
-      if (injected) {
-        showNotification('Context restored! Press Enter to send.', 'success');
-      } else {
-        // Fallback: copy to clipboard
-        await navigator.clipboard.writeText(resumePrompt);
-        showNotification('Copied to clipboard - paste manually', 'info');
-      }
-
-    } catch (error) {
-      console.error('SessionLink: Resume error', error);
-      showNotification('Error resuming context: ' + error.message, 'error');
-    } finally {
-      resumeBtn.innerHTML = originalContent;
-      resumeBtn.disabled = false;
-    }
-  }
-
-  // Inject prompt into the input area
-  async function injectPrompt(text) {
-    const selectors = currentPlatform.selectors;
-    
-    // Try to find input area
-    let inputArea = document.querySelector(selectors.inputArea);
-    
-    if (!inputArea) {
-      // Try alternative selectors
-      inputArea = document.querySelector('textarea, [contenteditable="true"]');
-    }
-    
-    if (!inputArea) {
-      return false;
     }
 
-    // Handle different input types
-    if (inputArea.tagName === 'TEXTAREA' || inputArea.tagName === 'INPUT') {
-      inputArea.value = text;
-      inputArea.dispatchEvent(new Event('input', { bubbles: true }));
-      inputArea.dispatchEvent(new Event('change', { bubbles: true }));
-    } else if (inputArea.contentEditable === 'true') {
-      inputArea.innerHTML = '';
-      inputArea.textContent = text;
-      inputArea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
-    }
-
-    // Focus the input
-    inputArea.focus();
-    
+    input.focus();
     return true;
   }
 
-  // Send message to background script
-  function sendMessageToBackground(message) {
-    return new Promise((resolve, reject) => {
-      const browserAPI = typeof browser !== 'undefined' ? browser : chrome;
-      
-      browserAPI.runtime.sendMessage(message, (response) => {
-        if (browserAPI.runtime.lastError) {
-          reject(new Error(browserAPI.runtime.lastError.message));
-        } else {
-          resolve(response || { success: false, error: 'No response' });
-        }
-      });
+  // ── Simulate send (Enter key + click send button) ──────────────────
+  function simulateSend() {
+    var sel = platform.selectors;
+
+    // Small delay to let React/framework process the input
+    setTimeout(function () {
+      // Try clicking the send button first
+      var sendBtn = document.querySelector(sel.sendButton);
+      if (sendBtn && !sendBtn.disabled) {
+        sendBtn.click();
+        console.log('SessionLink: clicked send button');
+        return;
+      }
+
+      // Fallback: press Enter on the input
+      var input = document.querySelector(sel.inputArea) ||
+                  document.querySelector('#prompt-textarea, [contenteditable="true"], textarea');
+      if (input) {
+        input.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+          bubbles: true, cancelable: true
+        }));
+        console.log('SessionLink: dispatched Enter keydown');
+      }
+    }, 400);
+  }
+
+  // ── Notification toast ─────────────────────────────────────────────
+  function showNotification(message, type) {
+    type = type || 'info';
+    var existing = document.querySelector('.sessionlink-notification');
+    if (existing) existing.remove();
+
+    var el = document.createElement('div');
+    el.className = 'sessionlink-notification sessionlink-notification-' + type;
+    el.textContent = message;
+    document.body.appendChild(el);
+
+    setTimeout(function () { el.classList.add('show'); }, 20);
+    setTimeout(function () {
+      el.classList.remove('show');
+      setTimeout(function () { el.remove(); }, 300);
+    }, 3500);
+  }
+
+  // ── Escape HTML ────────────────────────────────────────────────────
+  function escapeHtml(str) {
+    if (!str) return '';
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // ── SAVE STATE handler ─────────────────────────────────────────────
+  function handleSave() {
+    var btn = document.getElementById('sessionlink-save-btn');
+    if (!btn || btn.disabled) return;
+
+    btn.disabled = true;
+    var origHTML = btn.innerHTML;
+    btn.innerHTML =
+      '<svg class="sessionlink-spinner" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle></svg>' +
+      '<span>Saving…</span>';
+
+    var messages = scrapeConversation(15);
+    if (messages.length === 0) {
+      showNotification('No conversation found to save.', 'error');
+      btn.innerHTML = origHTML;
+      btn.disabled = false;
+      return;
+    }
+
+    // Build conversation text
+    var parts = [];
+    for (var i = 0; i < messages.length; i++) {
+      parts.push(messages[i].role.toUpperCase() + ': ' + sanitize(messages[i].content));
+    }
+    var conversationText = parts.join('\n\n');
+
+    sendMsg({
+      action: 'summarize',
+      conversation: conversationText,
+      platform: platform.name,
+      url: window.location.href,
+      timestamp: new Date().toISOString()
+    }, function (response) {
+      btn.innerHTML = origHTML;
+      btn.disabled = false;
+
+      if (response && response.success) {
+        showNotification('Context saved successfully!', 'success');
+      } else {
+        var errMsg = (response && response.error) ? response.error : 'Failed to save context';
+        showNotification(errMsg, 'error');
+      }
     });
   }
 
-  // Show notification toast
-  function showNotification(message, type = 'info') {
-    // Remove existing notification
-    const existing = document.querySelector('.sessionlink-notification');
-    if (existing) {
-      existing.remove();
-    }
+  // ── RESUME STATE handler ───────────────────────────────────────────
+  function handleResume() {
+    var btn = document.getElementById('sessionlink-resume-btn');
+    if (!btn || btn.disabled) return;
 
-    const notification = document.createElement('div');
-    notification.className = `sessionlink-notification sessionlink-notification-${type}`;
-    notification.textContent = message;
-    
-    document.body.appendChild(notification);
-    
-    // Animate in
-    setTimeout(() => notification.classList.add('show'), 10);
-    
-    // Remove after 3 seconds
-    setTimeout(() => {
-      notification.classList.remove('show');
-      setTimeout(() => notification.remove(), 300);
-    }, 3000);
+    btn.disabled = true;
+    var origHTML = btn.innerHTML;
+    btn.innerHTML =
+      '<svg class="sessionlink-spinner" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle></svg>' +
+      '<span>Loading…</span>';
+
+    sendMsg({ action: 'getLastSave' }, function (response) {
+      btn.innerHTML = origHTML;
+      btn.disabled = false;
+
+      if (!response || !response.success || !response.data) {
+        showNotification('No saved context found. Save a conversation first.', 'error');
+        return;
+      }
+
+      var prompt = response.data.summary;
+      var injected = injectIntoInput(prompt);
+
+      if (injected) {
+        showNotification('Context injected! Sending…', 'success');
+        simulateSend();
+      } else {
+        // Fallback: copy to clipboard
+        navigator.clipboard.writeText(prompt).then(function () {
+          showNotification('Copied to clipboard — paste it manually.', 'info');
+        }).catch(function () {
+          showNotification('Could not inject or copy. Please paste manually.', 'error');
+        });
+      }
+    });
   }
 
-  // Initialize and inject buttons
+  // ── Create UI elements ─────────────────────────────────────────────
+  function createContainer() {
+    var old = document.getElementById('sessionlink-container');
+    if (old) old.remove();
+
+    var container = document.createElement('div');
+    container.id = 'sessionlink-container';
+    container.className = 'sessionlink-floating-container';
+    return container;
+  }
+
+  function createSaveButton() {
+    var btn = document.createElement('button');
+    btn.id = 'sessionlink-save-btn';
+    btn.className = 'sessionlink-btn sessionlink-save-btn';
+    btn.title = 'Save conversation context for later';
+    btn.innerHTML =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>' +
+      '<polyline points="17 21 17 13 7 13 7 21"></polyline>' +
+      '<polyline points="7 3 7 8 15 8"></polyline>' +
+      '</svg>' +
+      '<span>Save State</span>';
+    btn.addEventListener('click', handleSave);
+    return btn;
+  }
+
+  function createResumeButton() {
+    var btn = document.createElement('button');
+    btn.id = 'sessionlink-resume-btn';
+    btn.className = 'sessionlink-btn sessionlink-resume-btn';
+    btn.title = 'Resume from last saved context';
+    btn.innerHTML =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+      '<polyline points="1 4 1 10 7 10"></polyline>' +
+      '<path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>' +
+      '</svg>' +
+      '<span>Resume State</span>';
+    btn.addEventListener('click', handleResume);
+    return btn;
+  }
+
+  // ── Inject buttons into page ───────────────────────────────────────
+  function injectButtons() {
+    // Don't double-inject
+    if (document.getElementById('sessionlink-container')) return;
+
+    var container = createContainer();
+    container.appendChild(createSaveButton());
+    container.appendChild(createResumeButton());
+    document.body.appendChild(container);
+    console.log('SessionLink: buttons injected on ' + platform.name);
+  }
+
+  // ── Initialise with retry ──────────────────────────────────────────
   function initialize() {
-    // Wait for page to be ready
-    const checkReady = setInterval(() => {
-      const conversationArea = document.querySelector(currentPlatform.selectors.conversationArea);
-      
-      if (conversationArea || document.readyState === 'complete') {
-        clearInterval(checkReady);
+    var attempts = 0;
+    var maxAttempts = 20; // 10 seconds
+
+    var timer = setInterval(function () {
+      attempts++;
+      var area = document.querySelector(platform.selectors.conversationArea);
+      if (area || document.readyState === 'complete' || attempts >= maxAttempts) {
+        clearInterval(timer);
         injectButtons();
       }
     }, 500);
-    
-    // Timeout after 10 seconds
-    setTimeout(() => clearInterval(checkReady), 10000);
   }
 
-  // Inject buttons into page
-  function injectButtons() {
-    const container = createButtonContainer();
-    
-    // Always show save button
-    container.appendChild(createSaveButton());
-    
-    // Show resume button (check for saved state)
-    sendMessageToBackground({ action: 'hasSavedState' })
-      .then(response => {
-        if (response.success && response.hasSaved) {
-          container.appendChild(createResumeButton());
-        }
-      })
-      .catch(err => {
-        console.log('SessionLink: Could not check saved state', err);
-        // Add resume button anyway - it will show error if no state
-        container.appendChild(createResumeButton());
-      });
-    
-    document.body.appendChild(container);
-    console.log('SessionLink: Buttons injected');
-  }
-
-  // Watch for navigation changes (SPA support)
-  function watchForNavigation() {
-    let lastUrl = window.location.href;
-    
-    const observer = new MutationObserver(() => {
+  // ── Watch for SPA navigation ───────────────────────────────────────
+  function watchNavigation() {
+    var lastUrl = window.location.href;
+    var observer = new MutationObserver(function () {
       if (window.location.href !== lastUrl) {
         lastUrl = window.location.href;
-        console.log('SessionLink: Navigation detected, reinitializing');
-        setTimeout(initialize, 1000);
+        console.log('SessionLink: SPA navigation detected');
+        setTimeout(function () {
+          injectButtons();
+        }, 1500);
       }
     });
-    
-    observer.observe(document.body, { childList: true, subtree: true });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
   }
 
-  // Start the extension
+  // ── Boot ───────────────────────────────────────────────────────────
   initialize();
-  watchForNavigation();
+  watchNavigation();
 
 })();

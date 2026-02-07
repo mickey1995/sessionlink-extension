@@ -33,19 +33,19 @@ AI chatbots have a "goldfish memory" problem. Every time you start a new convers
 
 **SessionLink** solves this by:
 
-1. **Scraping** your conversation (last 10-15 turns)
+1. **Scraping** your conversation (last 15 turns)
 2. **Summarizing** it using AI into a structured "Context Handoff"
 3. **Storing** the summary locally in your browser
-4. **Injecting** it into new conversations with one click
+4. **Injecting** it into new conversations with one click and auto-sending
 
 ## Features
 
-- 🔗 **One-Click Save** - Capture your conversation context instantly
-- 🔄 **Instant Resume** - Restore context in new chats with a single click
-- 🤖 **Multi-Platform** - Works with ChatGPT, Claude, and Gemini
-- 🔒 **100% Local** - Your API key and data never leave your device
-- 🌙 **Dark Mode** - Beautiful UI that adapts to your system theme
-- 🦊 **Cross-Browser** - Works on Chrome, Brave, Edge, and Firefox
+- **One-Click Save** - Capture your conversation context instantly
+- **Instant Resume** - Restore context in new chats with a single click (auto-sends)
+- **Multi-Platform** - Works with ChatGPT, Claude, and Gemini
+- **100% Local** - Your API key and data never leave your device
+- **Dark Mode** - Beautiful UI that adapts to your system theme
+- **Cross-Browser** - Works on Chrome, Brave, Edge, and Firefox
 
 ## Installation
 
@@ -64,10 +64,6 @@ AI chatbots have a "goldfish memory" problem. Every time you start a new convers
 3. Open `about:debugging#/runtime/this-firefox`
 4. Click "Load Temporary Add-on"
 5. Select the `manifest.json` file
-
-### From Release (Recommended)
-
-Download the latest release from the [Releases](https://github.com/sessionlink/extension/releases) page.
 
 ## Usage
 
@@ -90,8 +86,8 @@ Download the latest release from the [Releases](https://github.com/sessionlink/e
 
 1. Start a new chat on any supported platform
 2. Click the floating **"Resume State"** button
-3. The saved context will be injected into the input
-4. Press Enter to send and continue where you left off
+3. The saved context is injected into the input and **auto-sent**
+4. The AI picks up right where you left off
 
 ## API Setup
 
@@ -113,11 +109,11 @@ SessionLink requires an API key to summarize your conversations. Your key is sto
 
 SessionLink is built with a **local-first** security model:
 
-- ✅ Your API key is stored locally in your browser
-- ✅ Conversation data never leaves your device
-- ✅ No analytics or tracking
-- ✅ No external servers (except API calls to OpenAI/Gemini)
-- ✅ Open source - audit the code yourself
+- Your API key is stored locally in your browser
+- Conversation data never leaves your device (except to your chosen API for summarization)
+- No analytics or tracking
+- No external servers
+- Open source - audit the code yourself
 
 ## How It Works
 
@@ -145,13 +141,14 @@ OUTPUT: A single, copy-pasteable prompt block starting with 'SYSTEM HANDOFF:'.
 │                      Browser Extension                       │
 ├─────────────────────────────────────────────────────────────┤
 │  Content Script          │  Background Worker               │
-│  ├─ DOM Observer         │  ├─ API Handler (OpenAI/Gemini) │
+│  ├─ Platform Detection   │  ├─ API Handler (OpenAI/Gemini) │
 │  ├─ Button Injection     │  ├─ Storage Manager             │
-│  └─ Message Scraping     │  └─ Lifecycle Events            │
+│  ├─ Conversation Scrape  │  └─ Lifecycle Events            │
+│  └─ Auto-Send on Resume  │                                  │
 ├─────────────────────────────────────────────────────────────┤
-│  Popup UI                │  Storage                         │
-│  ├─ Settings Form        │  ├─ API Key (encrypted)         │
-│  └─ Saved States List    │  └─ Saved Summaries             │
+│  Popup UI                │  Storage (chrome.storage.local)  │
+│  ├─ Settings Form        │  ├─ API Key & Provider          │
+│  └─ Saved States List    │  └─ Saved Summaries (up to 20)  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -161,21 +158,21 @@ OUTPUT: A single, copy-pasteable prompt block starting with 'SYSTEM HANDOFF:'.
 
 ```
 sessionlink/
-├── manifest.json           # Chrome/Edge manifest (MV3)
-├── manifest.firefox.json   # Firefox manifest (MV3)
+├── manifest.json           # Chrome/Edge/Brave manifest (MV3)
+├── manifest.firefox.json   # Firefox manifest (MV3 + gecko settings)
 ├── scripts/
-│   ├── background.js       # Service worker
-│   ├── content.js          # DOM manipulation
-│   └── utils.js            # Helper functions
+│   ├── background.js       # Service worker: API calls, storage, lifecycle
+│   ├── content.js          # Content script: DOM injection, scraping, resume
+│   └── utils.js            # Helper functions and cross-browser utilities
 ├── lib/
-│   └── browser-polyfill.js # Cross-browser compatibility
+│   └── browser-polyfill.js # Cross-browser API polyfill (reference)
 ├── ui/
 │   ├── popup.html          # Extension popup
-│   ├── popup.js            # Popup logic
-│   ├── popup.css           # Popup styles
-│   └── styles.css          # Injected button styles
+│   ├── popup.js            # Popup logic: settings persistence, saves display
+│   ├── popup.css           # Popup styles (dark-mode compatible)
+│   └── styles.css          # Injected button and notification styles
 ├── pages/
-│   ├── onboarding.html     # Welcome page
+│   ├── onboarding.html     # Welcome page (opens on install)
 │   └── uninstall.html      # Goodbye page
 └── icons/
     ├── icon16.png
@@ -191,32 +188,36 @@ No build step required! The extension runs directly from source.
 For production packaging:
 
 ```bash
-# Chrome/Edge
-zip -r sessionlink-chrome.zip . -x "*.git*" -x "*.md" -x "manifest.firefox.json"
+# Chrome/Edge/Brave
+zip -r sessionlink-chrome.zip . -x "*.git*" "manifest.firefox.json" "node_modules/*"
 
 # Firefox
 cp manifest.firefox.json manifest.json
-zip -r sessionlink-firefox.zip . -x "*.git*" -x "*.md" -x "manifest.chrome.json"
-```
-
-### Testing
-
-```bash
-# Validate extension structure
-node validate_extension.js
-
-# Lint JavaScript (requires ESLint)
-npx eslint scripts/*.js lib/*.js ui/*.js
+zip -r sessionlink-firefox.zip . -x "*.git*" "node_modules/*"
 ```
 
 ## Supported Platforms
 
 | Platform | Status | Notes |
 |----------|--------|-------|
-| ChatGPT (chatgpt.com) | ✅ Full Support | |
-| ChatGPT (chat.openai.com) | ✅ Full Support | Legacy domain |
-| Claude (claude.ai) | ✅ Full Support | |
-| Gemini (gemini.google.com) | ✅ Full Support | |
+| ChatGPT (chatgpt.com) | Full Support | |
+| ChatGPT (chat.openai.com) | Full Support | Legacy domain |
+| Claude (claude.ai) | Full Support | |
+| Gemini (gemini.google.com) | Full Support | |
+
+## Changelog
+
+### v1.1.0 (2026-02-07)
+- **Fixed:** Settings now persist correctly across popup open/close cycles
+- **Fixed:** Content script messaging uses callback-based `chrome.runtime.sendMessage` for reliable service worker communication
+- **Fixed:** Resume injects text AND auto-sends via send button click / Enter key
+- **Fixed:** ChatGPT ProseMirror contenteditable input handling with native setter bypass
+- **Fixed:** Removed unnecessary polyfill dependency from content scripts
+- **Updated:** DOM selectors for ChatGPT, Claude, and Gemini (Feb 2026)
+- **Added:** Comprehensive test suite (37 unit tests + 14 browser integration tests, all passing)
+
+### v1.0.0 (2026-02-04)
+- Initial release
 
 ## Troubleshooting
 
@@ -250,14 +251,8 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## Acknowledgments
-
-- Built with love for the AI community
-- Inspired by the frustration of losing context in AI conversations
-- Thanks to OpenAI and Google for their APIs
-
 ---
 
 <p align="center">
-  Made with ❤️ by the SessionLink Team
+  Made with care by the SessionLink Team
 </p>

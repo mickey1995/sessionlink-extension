@@ -1,123 +1,130 @@
 /**
  * SessionLink Background Service Worker
- * Handles API calls, storage management, and lifecycle events
+ * Handles API calls, storage management, and lifecycle events.
+ *
+ * Key fixes in this version:
+ *  - Uses raw chrome.* APIs with callbacks (service workers cannot load
+ *    the browser-polyfill script, and Promises from polyfill caused
+ *    sendResponse to be called after the port closed).
+ *  - sendResponse is called synchronously inside the callback chain;
+ *    `return true` keeps the message channel open for the async work.
  */
 
-// Use appropriate API based on environment
-const browserAPI = typeof browser !== 'undefined' ? browser : chrome;
+// ── Summarisation system prompt ──────────────────────────────────────
+var SUMMARIZATION_PROMPT =
+  'Analyze this conversation history. Create a \'Context Handoff\' summary for another AI instance.\n\n' +
+  'STRUCTURE:\n' +
+  '1. **Project Goal:** (1 sentence)\n' +
+  '2. **Current Tech Stack:** (Languages, frameworks decided on)\n' +
+  '3. **Progress Snapshot:** (What is working, what is broken)\n' +
+  '4. **Immediate Next Step:** (The very next task to perform)\n' +
+  '5. **Code Context:** (Key variable names or architectural decisions)\n\n' +
+  'OUTPUT: A single, copy-pasteable prompt block starting with \'SYSTEM HANDOFF:\'.\n\n' +
+  'If the conversation is not about a coding project, adapt the structure to:\n' +
+  '1. **Main Topic:** (1 sentence summary)\n' +
+  '2. **Key Points Discussed:** (Important information covered)\n' +
+  '3. **Current Status:** (Where the conversation left off)\n' +
+  '4. **Next Steps:** (What should happen next)\n' +
+  '5. **Important Context:** (Critical details to remember)';
 
-// Summarization system prompt
-const SUMMARIZATION_PROMPT = `Analyze this conversation history. Create a 'Context Handoff' summary for another AI instance.
-
-STRUCTURE:
-1. **Project Goal:** (1 sentence)
-2. **Current Tech Stack:** (Languages, frameworks decided on)
-3. **Progress Snapshot:** (What is working, what is broken)
-4. **Immediate Next Step:** (The very next task to perform)
-5. **Code Context:** (Key variable names or architectural decisions)
-
-OUTPUT: A single, copy-pasteable prompt block starting with 'SYSTEM HANDOFF:'.
-
-If the conversation is not about a coding project, adapt the structure to:
-1. **Main Topic:** (1 sentence summary)
-2. **Key Points Discussed:** (Important information covered)
-3. **Current Status:** (Where the conversation left off)
-4. **Next Steps:** (What should happen next)
-5. **Important Context:** (Critical details to remember)`;
-
-// Message listener for content script communication
-browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  handleMessage(message, sender)
-    .then(sendResponse)
-    .catch(error => {
-      console.error('SessionLink Background Error:', error);
-      sendResponse({ success: false, error: error.message });
-    });
-  
-  // Return true to indicate async response
+// ── Message listener ─────────────────────────────────────────────────
+chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
+  // We MUST return true to signal that sendResponse will be called async.
+  handleMessage(message, sendResponse);
   return true;
 });
 
-// Handle incoming messages
-async function handleMessage(message, sender) {
+function handleMessage(message, sendResponse) {
   switch (message.action) {
     case 'summarize':
-      return await handleSummarize(message);
-    
+      handleSummarize(message, sendResponse);
+      break;
     case 'getLastSave':
-      return await getLastSave();
-    
+      getLastSave(sendResponse);
+      break;
     case 'getAllSaves':
-      return await getAllSaves();
-    
+      getAllSaves(sendResponse);
+      break;
     case 'hasSavedState':
-      return await hasSavedState();
-    
+      hasSavedState(sendResponse);
+      break;
     case 'deleteSave':
-      return await deleteSave(message.id);
-    
+      deleteSave(message.id, sendResponse);
+      break;
     case 'getSettings':
-      return await getSettings();
-    
+      getSettings(sendResponse);
+      break;
     case 'saveSettings':
-      return await saveSettings(message.settings);
-    
+      saveSettings(message.settings, sendResponse);
+      break;
     default:
-      return { success: false, error: 'Unknown action' };
+      sendResponse({ success: false, error: 'Unknown action: ' + message.action });
   }
 }
 
-// Handle summarization request
-async function handleSummarize(message) {
-  const settings = await getSettings();
-  
-  if (!settings.data || !settings.data.apiKey) {
-    return { 
-      success: false, 
-      error: 'API key not configured. Please open the extension popup and add your API key.' 
-    };
-  }
-
-  const { apiKey, apiProvider } = settings.data;
-  
-  try {
-    let summary;
-    
-    if (apiProvider === 'openai') {
-      summary = await callOpenAI(apiKey, message.conversation);
-    } else if (apiProvider === 'gemini') {
-      summary = await callGemini(apiKey, message.conversation);
-    } else {
-      return { success: false, error: 'Invalid API provider' };
+// ── Summarise ────────────────────────────────────────────────────────
+function handleSummarize(message, sendResponse) {
+  chrome.storage.local.get(['settings'], function (result) {
+    if (chrome.runtime.lastError) {
+      sendResponse({ success: false, error: chrome.runtime.lastError.message });
+      return;
     }
 
-    // Save the summary
-    const saveData = {
-      id: generateId(),
-      summary: summary,
-      platform: message.platform,
-      url: message.url,
-      timestamp: message.timestamp,
-      preview: summary.substring(0, 100) + '...'
-    };
+    var settings = result.settings || {};
+    if (!settings.apiKey) {
+      sendResponse({
+        success: false,
+        error: 'API key not configured. Open the SessionLink popup and add your API key.'
+      });
+      return;
+    }
 
-    await saveSummary(saveData);
-    
-    return { success: true, data: saveData };
-    
-  } catch (error) {
-    console.error('Summarization error:', error);
-    return { success: false, error: error.message };
-  }
+    var provider = settings.apiProvider || 'openai';
+    var apiKey = settings.apiKey;
+
+    var fetchPromise;
+    if (provider === 'openai') {
+      fetchPromise = callOpenAI(apiKey, message.conversation);
+    } else if (provider === 'gemini') {
+      fetchPromise = callGemini(apiKey, message.conversation);
+    } else {
+      sendResponse({ success: false, error: 'Invalid API provider: ' + provider });
+      return;
+    }
+
+    fetchPromise
+      .then(function (summary) {
+        var saveData = {
+          id: generateId(),
+          summary: summary,
+          platform: message.platform || 'Unknown',
+          url: message.url || '',
+          timestamp: message.timestamp || new Date().toISOString(),
+          preview: summary.substring(0, 120)
+        };
+
+        saveSummary(saveData, function (err) {
+          if (err) {
+            sendResponse({ success: false, error: 'Saved summary but storage failed: ' + err });
+          } else {
+            sendResponse({ success: true, data: saveData });
+          }
+        });
+      })
+      .catch(function (err) {
+        console.error('SessionLink: summarization error', err);
+        sendResponse({ success: false, error: err.message || String(err) });
+      });
+  });
 }
 
-// Call OpenAI API
-async function callOpenAI(apiKey, conversation) {
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+// ── OpenAI API ───────────────────────────────────────────────────────
+function callOpenAI(apiKey, conversation) {
+  return fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`
+      'Authorization': 'Bearer ' + apiKey
     },
     body: JSON.stringify({
       model: 'gpt-4o-mini',
@@ -128,203 +135,165 @@ async function callOpenAI(apiKey, conversation) {
       max_tokens: 1000,
       temperature: 0.3
     })
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error?.message || `OpenAI API error: ${response.status}`);
-  }
-
-  const data = await response.json();
-  return data.choices[0].message.content;
-}
-
-// Call Gemini API
-async function callGemini(apiKey, conversation) {
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              { text: SUMMARIZATION_PROMPT + '\n\n---\n\nCONVERSATION:\n' + conversation }
-            ]
-          }
-        ],
-        generationConfig: {
-          temperature: 0.3,
-          maxOutputTokens: 1000
-        }
-      })
+  }).then(function (response) {
+    if (!response.ok) {
+      return response.json().catch(function () { return {}; }).then(function (body) {
+        throw new Error((body.error && body.error.message) || 'OpenAI API error: ' + response.status);
+      });
     }
-  );
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error?.message || `Gemini API error: ${response.status}`);
-  }
-
-  const data = await response.json();
-  return data.candidates[0].content.parts[0].text;
+    return response.json();
+  }).then(function (data) {
+    return data.choices[0].message.content;
+  });
 }
 
-// Storage functions
-async function saveSummary(saveData) {
-  return new Promise((resolve, reject) => {
-    browserAPI.storage.local.get(['saves'], (result) => {
-      if (browserAPI.runtime.lastError) {
-        reject(new Error(browserAPI.runtime.lastError.message));
-        return;
-      }
-      
-      const saves = result.saves || [];
-      saves.unshift(saveData); // Add to beginning
-      
-      // Keep only last 20 saves
-      const trimmedSaves = saves.slice(0, 20);
-      
-      browserAPI.storage.local.set({ saves: trimmedSaves }, () => {
-        if (browserAPI.runtime.lastError) {
-          reject(new Error(browserAPI.runtime.lastError.message));
-        } else {
-          resolve();
-        }
+// ── Gemini API ───────────────────────────────────────────────────────
+function callGemini(apiKey, conversation) {
+  var url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + apiKey;
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{
+        parts: [{ text: SUMMARIZATION_PROMPT + '\n\n---\n\nCONVERSATION:\n' + conversation }]
+      }],
+      generationConfig: { temperature: 0.3, maxOutputTokens: 1000 }
+    })
+  }).then(function (response) {
+    if (!response.ok) {
+      return response.json().catch(function () { return {}; }).then(function (body) {
+        throw new Error((body.error && body.error.message) || 'Gemini API error: ' + response.status);
       });
-    });
+    }
+    return response.json();
+  }).then(function (data) {
+    return data.candidates[0].content.parts[0].text;
   });
 }
 
-async function getLastSave() {
-  return new Promise((resolve) => {
-    browserAPI.storage.local.get(['saves'], (result) => {
-      if (browserAPI.runtime.lastError) {
-        resolve({ success: false, error: browserAPI.runtime.lastError.message });
-        return;
-      }
-      
-      const saves = result.saves || [];
-      if (saves.length > 0) {
-        resolve({ success: true, data: saves[0] });
+// ── Storage helpers (all callback-based) ─────────────────────────────
+function saveSummary(saveData, callback) {
+  chrome.storage.local.get(['saves'], function (result) {
+    if (chrome.runtime.lastError) {
+      callback(chrome.runtime.lastError.message);
+      return;
+    }
+    var saves = result.saves || [];
+    saves.unshift(saveData);
+    if (saves.length > 20) saves = saves.slice(0, 20);
+
+    chrome.storage.local.set({ saves: saves }, function () {
+      if (chrome.runtime.lastError) {
+        callback(chrome.runtime.lastError.message);
       } else {
-        resolve({ success: false, error: 'No saved states found' });
+        callback(null);
       }
     });
   });
 }
 
-async function getAllSaves() {
-  return new Promise((resolve) => {
-    browserAPI.storage.local.get(['saves'], (result) => {
-      if (browserAPI.runtime.lastError) {
-        resolve({ success: false, error: browserAPI.runtime.lastError.message });
-        return;
-      }
-      
-      resolve({ success: true, data: result.saves || [] });
-    });
+function getLastSave(sendResponse) {
+  chrome.storage.local.get(['saves'], function (result) {
+    if (chrome.runtime.lastError) {
+      sendResponse({ success: false, error: chrome.runtime.lastError.message });
+      return;
+    }
+    var saves = result.saves || [];
+    if (saves.length > 0) {
+      sendResponse({ success: true, data: saves[0] });
+    } else {
+      sendResponse({ success: false, error: 'No saved states found' });
+    }
   });
 }
 
-async function hasSavedState() {
-  return new Promise((resolve) => {
-    browserAPI.storage.local.get(['saves'], (result) => {
-      if (browserAPI.runtime.lastError) {
-        resolve({ success: false, error: browserAPI.runtime.lastError.message });
-        return;
-      }
-      
-      const saves = result.saves || [];
-      resolve({ success: true, hasSaved: saves.length > 0 });
-    });
+function getAllSaves(sendResponse) {
+  chrome.storage.local.get(['saves'], function (result) {
+    if (chrome.runtime.lastError) {
+      sendResponse({ success: false, error: chrome.runtime.lastError.message });
+      return;
+    }
+    sendResponse({ success: true, data: result.saves || [] });
   });
 }
 
-async function deleteSave(id) {
-  return new Promise((resolve, reject) => {
-    browserAPI.storage.local.get(['saves'], (result) => {
-      if (browserAPI.runtime.lastError) {
-        reject(new Error(browserAPI.runtime.lastError.message));
-        return;
-      }
-      
-      const saves = result.saves || [];
-      const filteredSaves = saves.filter(save => save.id !== id);
-      
-      browserAPI.storage.local.set({ saves: filteredSaves }, () => {
-        if (browserAPI.runtime.lastError) {
-          reject(new Error(browserAPI.runtime.lastError.message));
-        } else {
-          resolve({ success: true });
-        }
-      });
-    });
+function hasSavedState(sendResponse) {
+  chrome.storage.local.get(['saves'], function (result) {
+    if (chrome.runtime.lastError) {
+      sendResponse({ success: false, error: chrome.runtime.lastError.message });
+      return;
+    }
+    var saves = result.saves || [];
+    sendResponse({ success: true, hasSaved: saves.length > 0 });
   });
 }
 
-async function getSettings() {
-  return new Promise((resolve) => {
-    browserAPI.storage.local.get(['settings'], (result) => {
-      if (browserAPI.runtime.lastError) {
-        resolve({ success: false, error: browserAPI.runtime.lastError.message });
-        return;
-      }
-      
-      resolve({ success: true, data: result.settings || {} });
-    });
-  });
-}
-
-async function saveSettings(settings) {
-  return new Promise((resolve, reject) => {
-    browserAPI.storage.local.set({ settings }, () => {
-      if (browserAPI.runtime.lastError) {
-        reject(new Error(browserAPI.runtime.lastError.message));
+function deleteSave(id, sendResponse) {
+  chrome.storage.local.get(['saves'], function (result) {
+    if (chrome.runtime.lastError) {
+      sendResponse({ success: false, error: chrome.runtime.lastError.message });
+      return;
+    }
+    var saves = result.saves || [];
+    var filtered = [];
+    for (var i = 0; i < saves.length; i++) {
+      if (saves[i].id !== id) filtered.push(saves[i]);
+    }
+    chrome.storage.local.set({ saves: filtered }, function () {
+      if (chrome.runtime.lastError) {
+        sendResponse({ success: false, error: chrome.runtime.lastError.message });
       } else {
-        resolve({ success: true });
+        sendResponse({ success: true });
       }
     });
   });
 }
 
-// Utility functions
+function getSettings(sendResponse) {
+  chrome.storage.local.get(['settings'], function (result) {
+    if (chrome.runtime.lastError) {
+      sendResponse({ success: false, error: chrome.runtime.lastError.message });
+      return;
+    }
+    sendResponse({ success: true, data: result.settings || {} });
+  });
+}
+
+function saveSettings(settings, sendResponse) {
+  chrome.storage.local.set({ settings: settings }, function () {
+    if (chrome.runtime.lastError) {
+      sendResponse({ success: false, error: chrome.runtime.lastError.message });
+    } else {
+      sendResponse({ success: true });
+    }
+  });
+}
+
+// ── Utility ──────────────────────────────────────────────────────────
 function generateId() {
-  return Date.now().toString(36) + Math.random().toString(36).substr(2);
+  return Date.now().toString(36) + Math.random().toString(36).substr(2, 8);
 }
 
-// Lifecycle events
-browserAPI.runtime.onInstalled.addListener((details) => {
+// ── Lifecycle events ─────────────────────────────────────────────────
+chrome.runtime.onInstalled.addListener(function (details) {
   if (details.reason === 'install') {
-    // Open onboarding page on first install
-    browserAPI.tabs.create({
-      url: browserAPI.runtime.getURL('pages/onboarding.html')
-    });
-    
-    // Initialize default settings
-    browserAPI.storage.local.set({
-      settings: {
-        apiProvider: 'openai',
-        apiKey: ''
-      },
+    chrome.tabs.create({ url: chrome.runtime.getURL('pages/onboarding.html') });
+
+    chrome.storage.local.set({
+      settings: { apiProvider: 'openai', apiKey: '' },
       saves: []
     });
-    
-    console.log('SessionLink: Extension installed');
+    console.log('SessionLink: installed');
   } else if (details.reason === 'update') {
-    console.log('SessionLink: Extension updated to version', browserAPI.runtime.getManifest().version);
+    console.log('SessionLink: updated to', chrome.runtime.getManifest().version);
   }
 });
 
-// Handle uninstall - set uninstall URL
-browserAPI.runtime.setUninstallURL(
-  browserAPI.runtime.getURL('pages/uninstall.html')
-).catch(() => {
-  // Fallback for browsers that don't support setUninstallURL with extension URLs
-  console.log('SessionLink: Could not set uninstall URL');
-});
+// Uninstall URL (external page only; extension pages won't work after uninstall)
+try {
+  chrome.runtime.setUninstallURL('https://sessionlink.dev/uninstall');
+} catch (e) {
+  // Ignore if not supported
+}
 
-console.log('SessionLink: Background service worker initialized');
+console.log('SessionLink: background service worker ready');
